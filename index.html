@@ -121,6 +121,7 @@
         <span class="w-2 h-2 rounded-full bg-emerald splash-dot" style="animation-delay:0.15s"></span>
         <span class="w-2 h-2 rounded-full bg-emerald splash-dot" style="animation-delay:0.3s"></span>
       </div>
+      <p class="absolute bottom-6 text-[11px] text-muted">Developed by Mishael Gadasi</p>
     </div>
   </div>
 </div>
@@ -163,7 +164,7 @@ function getItemIcon(name, category) {
 
 const KEYWORDS = {
   produce: ['בצל','שום','עגבני','מלפפון','פלפל','תפוח אדמה','תפוד','גזר','חסה','לימונ','אבוקדו','תות','בננה','תפוח','פטריות','כוסברה','פטרוזיליה','נענע','בטטה','תרד','כרוב','ברוקולי','קישוא','חציל','זוקיני','שומר','סלרי','ג׳ינג׳ר','זנגביל','אננס','מנגו','ענבים','אבטיח','מלון','שזיף','אפרסק','משמש','רוקט','דלעת','שעועית','תירס','כרובית','צנונית','צנון','ארטישוק','אספרגוס','שמיר','בזיליקום','אגס','רימון','דובדבן','תפוז','קלמנטינה'],
-  dairy: ['חלב','שמנת','גבינ','יוגורט','חמאה','קוטג','לבנה','מוצרל','פרמזן','ביצה','ביצים','קרם פרש','חלבון','גבינה צהובה','גבינה לבנה','שמנת חמוצה'],
+  dairy: ['חלב','שמנת','גבינ','יוגורט','חמאה','קוטג','לבנה','מוצרל','פרמזן','ביצ','קרם פרש','חלבון','גבינה צהובה','גבינה לבנה','שמנת חמוצה'],
   meat: ['עוף','בקר','טלה','הודו','דג ','דג,','סלמון','טונה','קציצ','נקניקי','בשר טחון','בשר','שרימפס','חזה עוף','כבד','סטייק','פילה','טופו','המבורגר','קבב','אסאדו','אנטריקוט','סינטה','שייטל','צלי בקר','צלעות','נתח','אונטריב','פסטרמה','קורנביף','נקניק','שוקיים','כנפיים עוף','ירך עוף','לב','טחול','פרגית','חזיר','בקלה','מושט','אמנון','דניס','לברק'],
   pantry: ['קמח','סוכר','אורז','פסטה','פנה','ספגטי','נודלס','שמן','חומץ','מלח','פלפל שחור','תבלין','רסק עגבניות','קוביית מרק','קובי','מרק','שמרים','סודה לשתייה','שוקולד','קקאו','דבש','טחינה','קטשופ','מיונז','חרדל','פירורי לחם','עדשים','קינואה','שיבולת שועל','זיתים','אורגנו','כמון','פפריקה','קורנפלור','אבקת אפייה','שקדים','אגוזים','חומוס','תמרים','כורכום','סילאן','פתיתים','בורגול','קוסקוס','זעתר','קינמון','לחם','פיתה','לחמניות','טורטייה','קרקר']
 };
@@ -793,6 +794,63 @@ const SAMPLE_CAPTIONS = {
 שתפו עם חברה #סלט #בריאות #קיץ`
 };
 
+const VARIETY_WORDS = ['ירוק','ירוקה','אדום','אדומה','לבן','לבנה','צהוב','צהובה'];
+
+// The keyword (from KEYWORDS[category]) that actually identifies what this item is - used to
+// recognize that "חבילת פטרוזיליה" and "פטרוזיליה קצוצה" are the same underlying product even
+// though the surrounding words (packaging vs. prep-state) differ completely.
+function coreKeywordOf(item) {
+  const n = (item.name || '').toLowerCase();
+  let best = null;
+  for (const k of KEYWORDS[item.category] || []) {
+    if (n.includes(k) && (!best || k.length > best.length)) best = k;
+  }
+  return best || n;
+}
+
+// Merges items that share the same core ingredient regardless of phrasing, keeping whichever
+// version is most useful for a shopping list: an explicit amount first, then a packaging/count
+// word (חבילת/שיני/קלחי...), then a real variety descriptor (color), then just the bare core name.
+function mergeByCoreIngredient(items) {
+  const groups = new Map();
+  items.forEach(it => {
+    const sig = it.category + '::' + coreKeywordOf(it);
+    if (!groups.has(sig)) groups.set(sig, []);
+    groups.get(sig).push(it);
+  });
+  const result = [];
+  groups.forEach(group => {
+    if (group.length === 1) { result.push(group[0]); return; }
+    const withAmount = group.find(it => it.amount);
+    if (withAmount) { result.push(withAmount); return; }
+    const withConnector = group.find(it => CONNECTOR_PRECEDERS.some(c => it.name.includes(c)));
+    if (withConnector) { result.push(withConnector); return; }
+    const withVariety = group.find(it => VARIETY_WORDS.some(c => it.name.includes(c)));
+    if (withVariety) { result.push(withVariety); return; }
+    result.push(mkItem(coreKeywordOf(group[0]), '', group[0].category));
+  });
+  return result;
+}
+
+// Recipe captions and OCR both introduce line breaks at the visual wrap point, not at sentence
+// boundaries - so a single instruction step often arrives as 2-3 separate lines. This joins
+// those fragments back into complete sentences before classification, so the saved cooking
+// guide reads like real steps instead of a pile of disconnected bullet fragments.
+function consolidateWrappedLines(lines) {
+  const result = [];
+  let buffer = '';
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) { if (buffer) { result.push(buffer); buffer = ''; } continue; }
+    const startsNewStep = /^\d{1,2}[\.\)]\s/.test(line) || /^[\-\*•●▪️]/.test(line);
+    if (buffer && startsNewStep) { result.push(buffer); buffer = ''; }
+    buffer = buffer ? (buffer + ' ' + line) : line;
+    if (/[.!?]['")]?\s*$/.test(line)) { result.push(buffer); buffer = ''; }
+  }
+  if (buffer) result.push(buffer);
+  return result;
+}
+
 function extractFromText(text) {
   const trimmed = text.trim();
   const lines = trimmed.split('\n').map(l => l.trim()).filter(Boolean);
@@ -822,7 +880,16 @@ function extractFromText(text) {
   }
 
   const ingredients = [], instructions = [];
-  lines.forEach(l => classifyLine(l, ingredients, instructions));
+  const instructionsHeaderIdx = lines.findIndex(l => {
+    const bare = stripDecoration(l).trim();
+    return SECTION_HEADERS.some(h => bare === h && (h.includes('הכנה') || h.includes('אופן')));
+  });
+  if (instructionsHeaderIdx === -1) {
+    lines.forEach(l => classifyLine(l, ingredients, instructions));
+  } else {
+    lines.slice(0, instructionsHeaderIdx + 1).forEach(l => classifyLine(l, ingredients, instructions));
+    consolidateWrappedLines(lines.slice(instructionsHeaderIdx + 1)).forEach(l => classifyLine(l, ingredients, instructions));
+  }
   const byName = new Map();
   ingredients.forEach(it => {
     const key = it.name.trim().toLowerCase();
@@ -843,7 +910,9 @@ function extractFromText(text) {
     if (already) { if (!already.amount && it.amount) already.amount = it.amount; return; }
     merged.push(it);
   });
-  const cleanIngredients = merged.filter(it => it.name && it.name.length < 60);
+  // Third pass: merge remaining near-duplicates that share the same core ingredient but are
+  // phrased completely differently (e.g. "חבילת פטרוזיליה" vs "פטרוזיליה קצוצה").
+  const cleanIngredients = mergeByCoreIngredient(merged).filter(it => it.name && it.name.length < 60);
   if (cleanIngredients.length === 0) return null;
 
   const NARRATIVE_HINTS = ['נתקעתי','החלטתי','רציתי','התחשק','אילתרתי','קמתי','אני אוהב','אני אוהבת','בפעם האחרונה','השבוע'];
@@ -854,7 +923,8 @@ function extractFromText(text) {
     if (secondLine && secondLine.length <= 40 && !looksNarrative(secondLine)) title = secondLine;
   }
   if (!title || title.length > 40 || /\d/.test(title)) title = 'מתכון שנוסף לאפליקציה';
-  return { title, items: cleanIngredients, instructions };
+  const cleanInstructions = [...new Set(instructions.map(s => s.trim()))].filter(Boolean);
+  return { title, items: cleanIngredients, instructions: cleanInstructions };
 }
 
 function fmtDate(d) {
@@ -947,7 +1017,12 @@ function mergeIntoShoppingList(items) {
   let added = 0, skipped = 0;
   items.forEach(src => {
     const norm = src.name.trim().toLowerCase();
-    const exists = state.shoppingList.some(it => !it.purchased && it.name.trim().toLowerCase() === norm);
+    const srcCore = coreKeywordOf(src);
+    const exists = state.shoppingList.some(it => {
+      if (it.purchased) return false;
+      if (it.name.trim().toLowerCase() === norm) return true;
+      return it.category === src.category && coreKeywordOf(it) === srcCore;
+    });
     if (exists) { skipped++; return; }
     state.shoppingList.push(mkItem(src.name, src.amount, src.category));
     added++;
@@ -1321,6 +1396,9 @@ function renderSettingsModal() {
       </button>
       ${state.testResult ? `<p class="text-xs mt-2 text-center ${state.testResult.ok ? 'text-emerald' : 'text-red-400'}">${state.testResult.message}</p>` : ''}
       ${state.apiKey ? `<button data-action="clear-api-key" class="w-full text-xs text-red-400 mt-3">הסירו את המפתח השמור</button>` : ''}
+      <div class="border-t border-line mt-4 pt-3 text-center">
+        <p class="text-[11px] text-muted">פותח על ידי <span class="font-bold text-paper/70">Mishael Gadasi</span></p>
+      </div>
     </div>
   </div>`;
 }
